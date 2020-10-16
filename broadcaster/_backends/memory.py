@@ -7,10 +7,10 @@ from .._base import Event
 class MemoryBackend(BroadcastBackend):
     def __init__(self, url: str):
         self._subscribed: typing.Set = set()
-        self._published: asyncio.Queue = asyncio.Queue()
+        self._published: typing.Optional[asyncio.Queue] = None
 
     async def connect(self) -> None:
-        pass
+        self._published = asyncio.Queue()
 
     async def disconnect(self) -> None:
         pass
