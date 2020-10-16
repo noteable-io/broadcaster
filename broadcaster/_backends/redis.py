@@ -11,14 +11,14 @@ class RedisBackend(BroadcastBackend):
 
         self._pub_conn: typing.Optional[aioredis.Redis] = None
         self._sub_conn: typing.Optional[aioredis.Redis] = None
-        self._msg_queue = asyncio.Queue()
 
-        self._tasks_lock = asyncio.Lock()
-        self._tasks = []
+        self._msg_queue: typing.Optional[asyncio.Queue] = None
+        self._tasks: typing.List[asyncio.Task] = []
 
     async def connect(self) -> None:
         self._pub_conn = await aioredis.create_redis(self.conn_url)
         self._sub_conn = await aioredis.create_redis(self.conn_url)
+        self._msg_queue = asyncio.Queue()  # must be created here, to get proper event loop
 
     async def disconnect(self) -> None:
         self._pub_conn.close()
@@ -26,19 +26,17 @@ class RedisBackend(BroadcastBackend):
 
         self._pub_conn = None
         self._sub_conn = None
+        self._msg_queue = None
 
     async def subscribe(self, channel: str) -> None:
         channels = await self._sub_conn.subscribe(channel)
-
-        async with self._tasks_lock:
-            self._tasks.append(asyncio.create_task(self.reader(channels[0])))
+        self._tasks.append(asyncio.create_task(self.reader(channels[0]), name=f"{channel} reader"))
 
     async def unsubscribe(self, channel: str) -> None:
         await self._sub_conn.unsubscribe(channel)
 
-        async with self._tasks_lock:
-            for task in self._tasks:
-                await task
+        for task in self._tasks:
+            await task
 
     async def publish(self, channel: str, message: typing.Any) -> None:
         await self._pub_conn.publish_json(channel, message)
