@@ -31,7 +31,7 @@ class RedisBackend(BroadcastBackend):
         channels = await self._sub_conn.subscribe(channel)
 
         async with self._tasks_lock:
-            self._tasks.append(asyncio.ensure_future(self.reader(channels[0])))
+            self._tasks.append(asyncio.create_task(self.reader(channels[0])))
 
     async def unsubscribe(self, channel: str) -> None:
         await self._sub_conn.unsubscribe(channel)
