@@ -1,5 +1,8 @@
 import aioredis
+from aioredis.abc import AbcChannel
+from aioredis.pubsub import Receiver
 import asyncio
+import json
 import logging
 import typing
 from .base import BroadcastBackend
@@ -16,7 +19,8 @@ class RedisBackend(BroadcastBackend):
         self._sub_conn: typing.Optional[aioredis.Redis] = None
 
         self._msg_queue: typing.Optional[asyncio.Queue] = None
-        self._tasks: typing.Dict[str, asyncio.Task] = {}
+        self._reader_task: typing.Optional[asyncio.Task] = None
+        self._mpsc: typing.Optional[Receiver] = None
 
     async def connect(self) -> None:
         if self._pub_conn or self._sub_conn or self._msg_queue:
@@ -26,33 +30,36 @@ class RedisBackend(BroadcastBackend):
         self._pub_conn = await aioredis.create_redis(self.conn_url)
         self._sub_conn = await aioredis.create_redis(self.conn_url)
         self._msg_queue = asyncio.Queue()  # must be created here, to get proper event loop
+        self._mpsc = Receiver()
+        self._reader_task = asyncio.create_task(self._reader())
 
     async def disconnect(self) -> None:
-        if not (self._pub_conn and self._sub_conn):
+        if self._pub_conn and self._sub_conn:
+            self._pub_conn.close()
+            self._sub_conn.close()
+        else:
             logger.warning("connections are not setup, invalid call to disconnect")
-            return
-
-        self._pub_conn.close()
-        self._sub_conn.close()
 
         self._pub_conn = None
         self._sub_conn = None
         self._msg_queue = None
 
-        for channel_name, task in self._tasks.items():
-            if not task.cancelled():
-                logger.debug(f"cancelling reader task for channel {channel_name!r}")
-                task.cancel()
+        if self._mpsc:
+            self._mpsc.stop()
+        else:
+            logger.warning("redis mpsc receiver is not set, cannot stop it")
 
-        self._tasks = {}
+        if self._reader_task and not self._reader_task.cancelled():
+            logger.debug("cancelling reader task")
+            self._reader_task.cancel()
+            self._reader_task = None
 
     async def subscribe(self, channel: str) -> None:
         if not self._sub_conn:
             logger.error(f"not connected, cannot subscribe to channel {channel!r}")
             return
 
-        channels = await self._sub_conn.subscribe(channel)
-        self._tasks[channel] = asyncio.create_task(self._reader(channels[0]), name=f"{channel} reader")
+        await self._sub_conn.subscribe(self._mpsc.channel(channel))
 
     async def unsubscribe(self, channel: str) -> None:
         if not self._sub_conn:
@@ -60,12 +67,6 @@ class RedisBackend(BroadcastBackend):
             return
 
         await self._sub_conn.unsubscribe(channel)
-
-        if channel not in self._tasks:
-            logger.warning(f"{channel} is not in task list, unable to wait for it to terminate")
-            return
-
-        await self._tasks[channel]
 
     async def publish(self, channel: str, message: typing.Any) -> None:
         if not self._pub_conn:
@@ -80,12 +81,16 @@ class RedisBackend(BroadcastBackend):
 
         return await self._msg_queue.get()
 
-    async def _reader(self, channel: aioredis.Channel) -> None:
-        while await channel.wait_message():
-            msg = await channel.get_json()
-
-            if not self._msg_queue:
-                logger.error(f"unable to put new message from {channel.name.decode('utf8')} into queue, not connected")
+    async def _reader(self) -> None:
+        async for channel, msg in self._mpsc.iter(encoding="utf8", decoder=json.loads):
+            if not isinstance(channel, AbcChannel):
+                logger.error(f"invalid channel returned from Receiver().iter() - {channel!r}")
                 continue
 
-            await self._msg_queue.put(Event(channel=channel.name.decode("utf8"), message=msg))
+            channel_name = channel.name.decode("utf8")
+
+            if not self._msg_queue:
+                logger.error(f"unable to put new message from {channel_name} into queue, not connected")
+                continue
+
+            await self._msg_queue.put(Event(channel=channel_name, message=msg))
