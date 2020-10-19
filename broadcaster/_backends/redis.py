@@ -39,6 +39,13 @@ class RedisBackend(BroadcastBackend):
         self._sub_conn = None
         self._msg_queue = None
 
+        for channel_name, task in self._tasks.items():
+            if not task.cancelled():
+                logger.debug(f"cancelling reader task for channel {channel_name!r}")
+                task.cancel()
+
+        self._tasks = {}
+
     async def subscribe(self, channel: str) -> None:
         if not self._sub_conn:
             logger.error(f"not connected, cannot subscribe to channel {channel!r}")
