@@ -13,6 +13,10 @@ class MemoryBackend(BroadcastBackend):
         self._published: typing.Optional[asyncio.Queue] = None
 
     async def connect(self) -> None:
+        if self._published is not None:
+            logger.warning("already connected, cannot connect again!")
+            return
+
         self._published = asyncio.Queue()
 
     async def disconnect(self) -> None:
