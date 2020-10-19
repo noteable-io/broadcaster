@@ -49,10 +49,13 @@ class RedisBackend(BroadcastBackend):
         else:
             logger.warning("redis mpsc receiver is not set, cannot stop it")
 
-        if self._reader_task and not self._reader_task.cancelled():
-            logger.debug("cancelling reader task")
-            self._reader_task.cancel()
-            self._reader_task = None
+        if self._reader_task:
+            if self._reader_task.done():
+                self._reader_task.result()
+            else:
+                logger.debug("cancelling reader task")
+                self._reader_task.cancel()
+                self._reader_task = None
 
     async def subscribe(self, channel: str) -> None:
         if not self._sub_conn:
